@@ -7,6 +7,7 @@ use std::path::Path;
 
 mod client;
 mod config;
+mod ui;
 
 #[derive(Parser)]
 #[command(name = "owojudge-cli")]
@@ -165,7 +166,8 @@ async fn main() -> Result<()> {
             ProblemCommands::Get { id } => {
                 let problem: serde_json::Value =
                     client.get(&format!("/api/problems/{}", id)).await?;
-                println!("{}", serde_json::to_string_pretty(&problem)?);
+                // Render using ratatui UI
+                ui::draw_problem(&problem)?;
             }
         },
         Commands::Submit {
