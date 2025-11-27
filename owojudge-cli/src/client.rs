@@ -23,10 +23,16 @@ impl OwoClient {
 
     fn base_url(&self) -> Result<String> {
         let config = self.config.lock().unwrap();
-        config
+        let url = config
             .base_url
             .clone()
-            .ok_or_else(|| anyhow!("Judge URL not configured. Run `config set-url <URL>` first."))
+            .ok_or_else(|| anyhow!("Judge URL not configured. Run `config set-url <URL>` first."))?;
+
+        if !url.starts_with("http://") && !url.starts_with("https://") {
+            Ok(format!("http://{}", url))
+        } else {
+            Ok(url)
+        }
     }
 
     fn update_cookies(&self, response: &Response) -> Result<()> {
@@ -157,5 +163,34 @@ impl OwoClient {
         } else {
             Err(anyhow!("Logout failed: {}", res.status()))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_base_url_scheme() {
+        let config = AppConfig {
+            base_url: Some("localhost:8080".to_string()),
+            cookies: Default::default(),
+        };
+        let client = OwoClient::new(config).unwrap();
+        assert_eq!(client.base_url().unwrap(), "http://localhost:8080");
+
+        let config_https = AppConfig {
+            base_url: Some("https://example.com".to_string()),
+            cookies: Default::default(),
+        };
+        let client_https = OwoClient::new(config_https).unwrap();
+        assert_eq!(client_https.base_url().unwrap(), "https://example.com");
+
+        let config_http = AppConfig {
+            base_url: Some("http://example.com".to_string()),
+            cookies: Default::default(),
+        };
+        let client_http = OwoClient::new(config_http).unwrap();
+        assert_eq!(client_http.base_url().unwrap(), "http://example.com");
     }
 }
