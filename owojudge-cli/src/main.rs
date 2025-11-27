@@ -86,8 +86,6 @@ enum SubmissionCommands {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    use tabled::{Table, Tabled};
-
     let cli = Cli::parse();
     let config = AppConfig::load()?;
     let client = OwoClient::new(config.clone())?;
@@ -138,30 +136,30 @@ async fn main() -> Result<()> {
             ProblemCommands::List => {
                 let problems: Vec<serde_json::Value> = client.get("/api/problems").await?;
 
-                #[derive(Tabled)]
-                struct ProblemDisplay {
-                    id: String,
-                    title: String,
-                    tags: String,
-                }
-
-                let display_problems: Vec<ProblemDisplay> = problems
+                let header = vec!["ID".to_string(), "Title".to_string(), "Tags".to_string()];
+                let rows: Vec<Vec<String>> = problems
                     .iter()
-                    .map(|p| ProblemDisplay {
-                        id: p["problemID"].as_str().unwrap_or("").to_string(),
-                        title: p["title"].as_str().unwrap_or("").to_string(),
-                        tags: p["tags"]
-                            .as_array()
-                            .unwrap_or(&vec![])
-                            .iter()
-                            .map(|t| t.as_str().unwrap_or("").to_string())
-                            .collect::<Vec<_>>()
-                            .join(", "),
+                    .map(|p| {
+                        vec![
+                            p["problemID"].as_str().unwrap_or("").to_string(),
+                            p["title"].as_str().unwrap_or("").to_string(),
+                            p["tags"]
+                                .as_array()
+                                .unwrap_or(&vec![])
+                                .iter()
+                                .map(|t| t.as_str().unwrap_or("").to_string())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ]
                     })
                     .collect();
 
-                let table = Table::new(display_problems).to_string();
-                println!("{}", table);
+                let data = ui::TableData {
+                    title: "Problems".to_string(),
+                    header,
+                    rows,
+                };
+                ui::draw_table(data)?;
             }
             ProblemCommands::Get { id } => {
                 let problem: serde_json::Value =
@@ -199,28 +197,32 @@ async fn main() -> Result<()> {
             SubmissionCommands::List => {
                 let submissions: Vec<serde_json::Value> = client.get("/api/submissions").await?;
 
-                #[derive(Tabled)]
-                struct SubmissionDisplay {
-                    serial: String,
-                    problem: String,
-                    status: String,
-                    score: String,
-                    lang: String,
-                }
-
-                let display_subs: Vec<SubmissionDisplay> = submissions
+                let header = vec![
+                    "Serial".to_string(),
+                    "Problem".to_string(),
+                    "Status".to_string(),
+                    "Score".to_string(),
+                    "Language".to_string(),
+                ];
+                let rows: Vec<Vec<String>> = submissions
                     .iter()
-                    .map(|s| SubmissionDisplay {
-                        serial: s["serialNumber"].to_string(),
-                        problem: s["problemID"].as_str().unwrap_or("").to_string(),
-                        status: s["status"].as_str().unwrap_or("").to_string(),
-                        score: s["score"].to_string(),
-                        lang: s["language"].as_str().unwrap_or("").to_string(),
+                    .map(|s| {
+                        vec![
+                            s["serialNumber"].to_string(),
+                            s["problemID"].as_str().unwrap_or("").to_string(),
+                            s["status"].as_str().unwrap_or("").to_string(),
+                            s["score"].to_string(),
+                            s["language"].as_str().unwrap_or("").to_string(),
+                        ]
                     })
                     .collect();
 
-                let table = Table::new(display_subs).to_string();
-                println!("{}", table);
+                let data = ui::TableData {
+                    title: "Submissions".to_string(),
+                    header,
+                    rows,
+                };
+                ui::draw_table(data)?;
             }
             SubmissionCommands::Get { serial_number } => {
                 let submission: serde_json::Value = client
