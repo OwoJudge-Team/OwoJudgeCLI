@@ -1,14 +1,14 @@
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
 pub struct AppConfig {
     pub base_url: Option<String>,
-    pub cookies: HashMap<String, String>,
+    pub cookies: BTreeMap<String, String>,
 }
 
 impl AppConfig {
@@ -29,7 +29,14 @@ impl AppConfig {
             fs::create_dir_all(parent)?;
         }
         let content = serde_json::to_string_pretty(self)?;
-        fs::write(path, content)?;
+        fs::write(&path, content)?;
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+
         Ok(())
     }
 

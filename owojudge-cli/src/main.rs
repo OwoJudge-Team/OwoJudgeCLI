@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 use client::OwoClient;
 use config::AppConfig;
@@ -39,10 +39,25 @@ enum Commands {
         #[command(subcommand)]
         command: SubmissionCommands,
     },
+    /// Announcement interaction
+    Announcements {
+        #[command(subcommand)]
+        command: AnnouncementCommands,
+    },
+    /// Contest interaction
+    Contests {
+        #[command(subcommand)]
+        command: ContestCommands,
+    },
+    /// Rejudge interaction (Admin only)
+    Rejudge {
+        #[command(subcommand)]
+        command: RejudgeCommands,
+    },
     /// Submit a solution
     Submit {
         #[arg(long, short)]
-        problem_id: String,
+        problem_id: u64,
         #[arg(long, short)]
         language: String,
         #[arg(long, short)]
@@ -73,7 +88,7 @@ enum ProblemCommands {
     /// List problems
     List,
     /// Get problem details
-    Get { id: String },
+    Get { id: u64 },
 }
 
 #[derive(Subcommand)]
@@ -84,11 +99,37 @@ enum SubmissionCommands {
     Get { serial_number: u64 },
 }
 
+#[derive(Subcommand)]
+enum AnnouncementCommands {
+    /// List announcements
+    List,
+    /// Get announcement details
+    Get { id: String },
+}
+
+#[derive(Subcommand)]
+enum ContestCommands {
+    /// List contests
+    List,
+    /// Get contest details
+    Get { id: String },
+    /// Get contest standings
+    Standings { id: String },
+}
+
+#[derive(Subcommand)]
+enum RejudgeCommands {
+    /// Rejudge a single submission
+    Submission { serial_number: u64 },
+    /// Rejudge all submissions for a problem
+    Problem { problem_serial_number: u64 },
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = AppConfig::load()?;
-    let client = OwoClient::new(config.clone())?;
+    let mut client = OwoClient::new(config.clone())?;
 
     match cli.command {
         Commands::Config { command } => match command {
@@ -119,15 +160,13 @@ async fn main() -> Result<()> {
                 println!("Logged out successfully.");
             }
             AuthCommands::Status => {
-                // GET /api/auth/status
-                // Responses: 200 OK (User object), 401 Unauthorized
                 match client.get::<serde_json::Value>("/api/auth/status").await {
                     Ok(user) => {
                         println!("Authenticated as: {}", user["username"]);
                         println!("{}", serde_json::to_string_pretty(&user)?);
                     }
-                    Err(_) => {
-                        println!("Not authenticated.");
+                    Err(e) => {
+                        println!("Authentication check failed: {}", e);
                     }
                 }
             }
@@ -136,12 +175,12 @@ async fn main() -> Result<()> {
             ProblemCommands::List => {
                 let problems: Vec<serde_json::Value> = client.get("/api/problems").await?;
 
-                let header = vec!["ID".to_string(), "Title".to_string(), "Tags".to_string()];
+                let header = vec!["SN".to_string(), "Title".to_string(), "Tags".to_string()];
                 let rows: Vec<Vec<String>> = problems
                     .iter()
                     .map(|p| {
                         vec![
-                            p["problemID"].as_str().unwrap_or("").to_string(),
+                            p["serialNumber"].to_string(),
                             p["title"].as_str().unwrap_or("").to_string(),
                             p["tags"]
                                 .as_array()
@@ -164,7 +203,6 @@ async fn main() -> Result<()> {
             ProblemCommands::Get { id } => {
                 let problem: serde_json::Value =
                     client.get(&format!("/api/problems/{}", id)).await?;
-                // Render using ratatui UI
                 ui::draw_problem(&problem)?;
             }
         },
@@ -174,11 +212,15 @@ async fn main() -> Result<()> {
             file,
         } => {
             let path = Path::new(&file);
-            let filename = path.file_name().unwrap().to_str().unwrap().to_string();
-            let content = fs::read_to_string(path)?;
+            let filename = path.file_name()
+                .ok_or_else(|| anyhow!("Invalid file path"))?
+                .to_str()
+                .ok_or_else(|| anyhow!("Filename is not valid UTF-8"))?
+                .to_string();
+            let content = fs::read_to_string(path).context("Could not read solution file")?;
 
             let submission_body = serde_json::json!({
-                "problemID": problem_id,
+                "problemSerialNumber": problem_id,
                 "language": language,
                 "userSolution": [
                     {
@@ -195,7 +237,9 @@ async fn main() -> Result<()> {
         }
         Commands::Submissions { command } => match command {
             SubmissionCommands::List => {
-                let submissions: Vec<serde_json::Value> = client.get("/api/submissions").await?;
+                let submissions: serde_json::Value = client.get("/api/submissions").await?;
+                let list = submissions["submissions"].as_array()
+                    .ok_or_else(|| anyhow!("Expected submissions array in API response"))?;
 
                 let header = vec![
                     "Serial".to_string(),
@@ -204,12 +248,12 @@ async fn main() -> Result<()> {
                     "Score".to_string(),
                     "Language".to_string(),
                 ];
-                let rows: Vec<Vec<String>> = submissions
+                let rows: Vec<Vec<String>> = list
                     .iter()
                     .map(|s| {
                         vec![
                             s["serialNumber"].to_string(),
-                            s["problemID"].as_str().unwrap_or("").to_string(),
+                            s["problemSerialNumber"].to_string(),
                             s["status"].as_str().unwrap_or("").to_string(),
                             s["score"].to_string(),
                             s["language"].as_str().unwrap_or("").to_string(),
@@ -229,6 +273,98 @@ async fn main() -> Result<()> {
                     .get(&format!("/api/submission/{}", serial_number))
                     .await?;
                 println!("{}", serde_json::to_string_pretty(&submission)?);
+            }
+        },
+        Commands::Announcements { command } => match command {
+            AnnouncementCommands::List => {
+                let announcements: Vec<serde_json::Value> = client.get("/api/announcement").await?;
+                let header = vec!["ID".to_string(), "Topic".to_string(), "Date".to_string()];
+                let rows: Vec<Vec<String>> = announcements
+                    .iter()
+                    .map(|a| {
+                        vec![
+                            a["_id"].as_str().unwrap_or("").to_string(),
+                            a["topic"].as_str().unwrap_or("").to_string(),
+                            a["timestamp"].as_str().unwrap_or("").to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::draw_table(ui::TableData {
+                    title: "Announcements".to_string(),
+                    header,
+                    rows,
+                })?;
+            }
+            AnnouncementCommands::Get { id } => {
+                let announcement: serde_json::Value = client.get(&format!("/api/announcement/{}", id)).await?;
+                ui::draw_announcement(&announcement)?;
+            }
+        },
+        Commands::Contests { command } => match command {
+            ContestCommands::List => {
+                let contests: Vec<serde_json::Value> = client.get("/api/contests").await?;
+                let header = vec!["ID".to_string(), "Title".to_string(), "Start Time".to_string()];
+                let rows: Vec<Vec<String>> = contests
+                    .iter()
+                    .map(|c| {
+                        vec![
+                            c["_id"].as_str().unwrap_or("").to_string(),
+                            c["title"].as_str().unwrap_or("").to_string(),
+                            c["startTime"].as_str().unwrap_or("").to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::draw_table(ui::TableData {
+                    title: "Contests".to_string(),
+                    header,
+                    rows,
+                })?;
+            }
+            ContestCommands::Get { id } => {
+                let contest: serde_json::Value = client.get(&format!("/api/contests/{}", id)).await?;
+                ui::draw_contest(&contest)?;
+            }
+            ContestCommands::Standings { id } => {
+                let standings: Vec<serde_json::Value> = client.get(&format!("/api/contests/{}/standings", id)).await?;
+                let header = vec![
+                    "Rank".to_string(),
+                    "User".to_string(),
+                    "Score".to_string(),
+                    "Solved".to_string(),
+                ];
+                let rows: Vec<Vec<String>> = standings
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| {
+                        vec![
+                            (i + 1).to_string(),
+                            s["username"].as_str().unwrap_or("").to_string(),
+                            s["totalScore"].to_string(),
+                            s["solvedCount"].to_string(),
+                        ]
+                    })
+                    .collect();
+                ui::draw_table(ui::TableData {
+                    title: "Standings".to_string(),
+                    header,
+                    rows,
+                })?;
+            }
+        },
+        Commands::Rejudge { command } => match command {
+            RejudgeCommands::Submission { serial_number } => {
+                client.post::<serde_json::Value, serde_json::Value>(
+                    &format!("/api/rejudge/submission/{}", serial_number),
+                    &serde_json::json!({}),
+                ).await?;
+                println!("Rejudge triggered for submission {}.", serial_number);
+            }
+            RejudgeCommands::Problem { problem_serial_number } => {
+                client.post::<serde_json::Value, serde_json::Value>(
+                    &format!("/api/rejudge/problem/{}", problem_serial_number),
+                    &serde_json::json!({}),
+                ).await?;
+                println!("Rejudge triggered for all submissions of problem {}.", problem_serial_number);
             }
         },
     }

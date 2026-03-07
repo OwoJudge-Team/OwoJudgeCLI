@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode},
+    event::{self, Event, KeyCode},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -10,10 +10,30 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap, Scrollbar, ScrollbarState, ScrollbarOrientation},
     Terminal,
 };
-use std::io;
+use std::io::{self, Stdout};
 use std::time::Duration;
 use anyhow::Result;
 use serde_json::Value;
+
+/// Helper to manage terminal raw mode and screen switching.
+fn with_terminal<F>(f: F) -> Result<()>
+where
+    F: FnOnce(&mut Terminal<CrosstermBackend<Stdout>>) -> Result<()>,
+{
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let res = f(&mut terminal);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    res
+}
 
 // --- Problem Detail View ---
 
@@ -22,8 +42,6 @@ struct ProblemAppState {
     scroll_tests: u16,
     // 0: Description, 1: Public Tests
     focus_index: usize,
-    max_scroll_description: u16,
-    max_scroll_tests: u16,
 }
 
 impl ProblemAppState {
@@ -32,8 +50,6 @@ impl ProblemAppState {
             scroll_description: 0,
             scroll_tests: 0,
             focus_index: 0,
-            max_scroll_description: 0,
-            max_scroll_tests: 0,
         }
     }
 
@@ -53,54 +69,44 @@ impl ProblemAppState {
         }
     }
 
-    fn scroll_down(&mut self) {
+    fn scroll_down(&mut self, max_desc: u16, max_tests: u16) {
         if self.focus_index == 0 {
-             // We don't strictly cap strictly at max_scroll because measuring height exactly is tricky before render,
-             // but we can try to be reasonable or just let it scroll.
-             // Ratatui's paragraph scroll is just an offset.
-             self.scroll_description += 1;
+             if self.scroll_description < max_desc {
+                self.scroll_description += 1;
+             }
         } else {
-             self.scroll_tests += 1;
+             if self.scroll_tests < max_tests {
+                self.scroll_tests += 1;
+             }
         }
     }
 }
 
 pub fn draw_problem(problem: &Value) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let res = run_problem_app(&mut terminal, problem);
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err)
-    }
-
-    Ok(())
+    with_terminal(|terminal| {
+        run_problem_app(terminal, problem)
+    })
 }
 
-fn run_problem_app<B: Backend>(terminal: &mut Terminal<B>, problem: &Value) -> io::Result<()> {
+fn run_problem_app<B: Backend>(terminal: &mut Terminal<B>, problem: &Value) -> Result<()> {
     let mut state = ProblemAppState::new();
 
+    let description = problem["description"].as_str().unwrap_or("");
+    let sample_testcases = problem["sampleTestcases"].as_array();
+    let tests_text = format_tests(sample_testcases);
+
+    let max_desc = description.lines().count() as u16;
+    let max_tests = tests_text.lines().count() as u16;
+
     loop {
-        terminal.draw(|f| ui_problem(f, problem, &mut state))?;
+        terminal.draw(|f| ui_problem(f, problem, &mut state, description, &tests_text))?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Tab => state.next_focus(),
-                    KeyCode::Char('j') | KeyCode::Down => state.scroll_down(),
+                    KeyCode::Char('j') | KeyCode::Down => state.scroll_down(max_desc, max_tests),
                     KeyCode::Char('k') | KeyCode::Up => state.scroll_up(),
                     _ => {}
                 }
@@ -109,7 +115,23 @@ fn run_problem_app<B: Backend>(terminal: &mut Terminal<B>, problem: &Value) -> i
     }
 }
 
-fn ui_problem(f: &mut ratatui::Frame, problem: &Value, state: &mut ProblemAppState) {
+fn format_tests(sample_testcases: Option<&Vec<Value>>) -> String {
+    if let Some(tests) = sample_testcases {
+        if tests.is_empty() {
+             "No public tests available.".to_string()
+        } else {
+             tests.iter().enumerate().map(|(i, t)| {
+                 let input = t["input"].as_str().unwrap_or("").trim();
+                 let output = t["output"].as_str().unwrap_or("").trim();
+                 format!("Test #{}:\nInput: {}\nOutput: {}", i + 1, input, output)
+             }).collect::<Vec<_>>().join("\n---\n")
+        }
+    } else {
+        "No public tests available.".to_string()
+    }
+}
+
+fn ui_problem(f: &mut ratatui::Frame, problem: &Value, state: &mut ProblemAppState, description: &str, tests_text: &str) {
     let size = f.area();
 
     let chunks = Layout::default()
@@ -149,24 +171,14 @@ fn ui_problem(f: &mut ratatui::Frame, problem: &Value, state: &mut ProblemAppSta
     f.render_widget(status_paragraph, chunks[1]);
 
     // 3. Description
-    let description = problem["description"].as_str().unwrap_or("No description provided.");
-    let desc_style = if state.focus_index == 0 {
-        Style::default().fg(Color::White).add_modifier(Modifier::BOLD) // Highlight title border? Or content?
-    } else {
-        Style::default()
-    };
     let desc_border_style = if state.focus_index == 0 {
          Style::default().fg(Color::Green)
     } else {
          Style::default()
     };
 
-    // We need to calculate line count for scrollbar if possible, but Textwrap is done by Paragraph.
-    // We can just estimate or use state.
-
     let description_paragraph = Paragraph::new(description)
         .wrap(Wrap { trim: true })
-        .style(desc_style)
         .scroll((state.scroll_description, 0))
         .block(Block::default().borders(Borders::ALL).title("Description").border_style(desc_border_style));
     f.render_widget(description_paragraph, chunks[2]);
@@ -178,38 +190,23 @@ fn ui_problem(f: &mut ratatui::Frame, problem: &Value, state: &mut ProblemAppSta
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
         let mut scrollbar_state = ScrollbarState::default()
-            .content_length(description.lines().count()) // Approximate
+            .content_length(description.lines().count())
             .position(state.scroll_description as usize);
         f.render_stateful_widget(
             scrollbar,
-            chunks[2].inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }), // Simple margin
+            chunks[2].inner(ratatui::layout::Margin { vertical: 1, horizontal: 0 }),
             &mut scrollbar_state,
         );
     }
 
     // 4. Public Tests
-    let sample_testcases = problem["sampleTestcases"].as_array();
-    let tests_text = if let Some(tests) = sample_testcases {
-        if tests.is_empty() {
-             "No public tests available.".to_string()
-        } else {
-             tests.iter().enumerate().map(|(i, t)| {
-                 let input = t["input"].as_str().unwrap_or("").trim();
-                 let output = t["output"].as_str().unwrap_or("").trim();
-                 format!("Test #{}:\nInput: {}\nOutput: {}", i + 1, input, output)
-             }).collect::<Vec<_>>().join("\n---\n")
-        }
-    } else {
-        "No public tests available.".to_string()
-    };
-
     let tests_border_style = if state.focus_index == 1 {
          Style::default().fg(Color::Green)
     } else {
          Style::default()
     };
 
-    let tests_paragraph = Paragraph::new(tests_text.clone())
+    let tests_paragraph = Paragraph::new(tests_text)
         .wrap(Wrap { trim: true })
         .scroll((state.scroll_tests, 0))
         .block(Block::default().borders(Borders::ALL).title("Public Tests").border_style(tests_border_style));
@@ -250,6 +247,159 @@ fn ui_problem(f: &mut ratatui::Frame, problem: &Value, state: &mut ProblemAppSta
     f.render_widget(footer, chunks[5]);
 }
 
+// --- Announcement View ---
+
+struct AnnouncementAppState {
+    scroll: u16,
+}
+
+pub fn draw_announcement(announcement: &Value) -> Result<()> {
+    with_terminal(|terminal| {
+        run_announcement_app(terminal, announcement)
+    })
+}
+
+fn run_announcement_app<B: Backend>(terminal: &mut Terminal<B>, announcement: &Value) -> Result<()> {
+    let mut state = AnnouncementAppState { scroll: 0 };
+    let content = announcement["content"].as_str().unwrap_or("");
+    let max_scroll = content.lines().count() as u16;
+
+    loop {
+        terminal.draw(|f| ui_announcement(f, announcement, &mut state))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('j') | KeyCode::Down => if state.scroll < max_scroll { state.scroll += 1 },
+                    KeyCode::Char('k') | KeyCode::Up => if state.scroll > 0 { state.scroll -= 1 },
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn ui_announcement(f: &mut ratatui::Frame, announcement: &Value, state: &mut AnnouncementAppState) {
+    let size = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Topic
+            Constraint::Length(3), // Timestamp
+            Constraint::Min(5),    // Content
+            Constraint::Length(1), // Footer
+        ])
+        .split(size);
+
+    let topic = announcement["topic"].as_str().unwrap_or("No Topic");
+    let timestamp = announcement["timestamp"].as_str().unwrap_or("Unknown Date");
+    let content = announcement["content"].as_str().unwrap_or("");
+
+    let topic_p = Paragraph::new(topic)
+        .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .block(Block::default().borders(Borders::ALL).title("Topic"));
+    f.render_widget(topic_p, chunks[0]);
+
+    let time_p = Paragraph::new(timestamp)
+        .block(Block::default().borders(Borders::ALL).title("Date"));
+    f.render_widget(time_p, chunks[1]);
+
+    let content_p = Paragraph::new(content)
+        .wrap(Wrap { trim: true })
+        .scroll((state.scroll, 0))
+        .block(Block::default().borders(Borders::ALL).title("Content"));
+    f.render_widget(content_p, chunks[2]);
+
+    let footer = Paragraph::new("Press <Up/Down/j/k> to scroll, <q> to quit")
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, chunks[3]);
+}
+
+// --- Contest View ---
+
+struct ContestAppState {
+    scroll: u16,
+}
+
+pub fn draw_contest(contest: &Value) -> Result<()> {
+    with_terminal(|terminal| {
+        run_contest_app(terminal, contest)
+    })
+}
+
+fn run_contest_app<B: Backend>(terminal: &mut Terminal<B>, contest: &Value) -> Result<()> {
+    let mut state = ContestAppState { scroll: 0 };
+    
+    let desc = contest["description"].as_str().unwrap_or("");
+    let mut content_text = format!("Description:\n{}\n\nProblems:\n", desc);
+    if let Some(problems) = contest["problems"].as_array() {
+        for p in problems {
+            let sn = p["serialNumber"].to_string();
+            let score = p["score"].to_string();
+            content_text.push_str(&format!("- Problem SN {}: ({} points)\n", sn, score));
+        }
+    }
+    let max_scroll = content_text.lines().count() as u16;
+
+    loop {
+        terminal.draw(|f| ui_contest(f, contest, &mut state, &content_text))?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('j') | KeyCode::Down => if state.scroll < max_scroll { state.scroll += 1 },
+                    KeyCode::Char('k') | KeyCode::Up => if state.scroll > 0 { state.scroll -= 1 },
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+fn ui_contest(f: &mut ratatui::Frame, contest: &Value, state: &mut ContestAppState, content_text: &str) {
+    let size = f.area();
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3), // Title
+            Constraint::Length(5), // Times & Info
+            Constraint::Min(5),    // Description & Problems
+            Constraint::Length(1), // Footer
+        ])
+        .split(size);
+
+    let title = contest["title"].as_str().unwrap_or("No Title");
+    let start = contest["startTime"].as_str().unwrap_or("");
+    let end = contest["endTime"].as_str().unwrap_or("Open-ended");
+    let sub_end = contest["submissionEndTime"].as_str().unwrap_or("");
+
+    let title_p = Paragraph::new(title)
+        .style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+        .alignment(Alignment::Center)
+        .block(Block::default().borders(Borders::ALL).title("Contest"));
+    f.render_widget(title_p, chunks[0]);
+
+    let info_text = format!(
+        "Start: {}\nEnd:   {}\nSubmissions Close: {}\nGM Allowed: {}",
+        start, end, sub_end, contest["canApplyGM"]
+    );
+    let info_p = Paragraph::new(info_text)
+        .block(Block::default().borders(Borders::ALL).title("Information"));
+    f.render_widget(info_p, chunks[1]);
+
+    let content_p = Paragraph::new(content_text)
+        .wrap(Wrap { trim: true })
+        .scroll((state.scroll, 0))
+        .block(Block::default().borders(Borders::ALL).title("Content"));
+    f.render_widget(content_p, chunks[2]);
+
+    let footer = Paragraph::new("Press <Up/Down/j/k> to scroll, <q> to quit")
+        .style(Style::default().fg(Color::DarkGray));
+    f.render_widget(footer, chunks[3]);
+}
+
 // --- Table View (Generic) ---
 
 pub struct TableData {
@@ -259,32 +409,16 @@ pub struct TableData {
 }
 
 pub fn draw_table(data: TableData) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-
-    let res = run_table_app(&mut terminal, data);
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    terminal.show_cursor()?;
-
-    if let Err(err) = res {
-        println!("{:?}", err)
-    }
-
-    Ok(())
+    with_terminal(|terminal| {
+        run_table_app(terminal, data)
+    })
 }
 
-fn run_table_app<B: Backend>(terminal: &mut Terminal<B>, data: TableData) -> io::Result<()> {
+fn run_table_app<B: Backend>(terminal: &mut Terminal<B>, data: TableData) -> Result<()> {
     let mut state = TableState::default();
-    state.select(Some(0));
+    if !data.rows.is_empty() {
+        state.select(Some(0));
+    }
 
     loop {
         terminal.draw(|f| ui_table(f, &data, &mut state))?;
@@ -294,30 +428,34 @@ fn run_table_app<B: Backend>(terminal: &mut Terminal<B>, data: TableData) -> io:
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                     KeyCode::Down | KeyCode::Char('j') => {
-                        let i = match state.selected() {
-                            Some(i) => {
-                                if i >= data.rows.len() - 1 {
-                                    0
-                                } else {
-                                    i + 1
+                        if !data.rows.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i >= data.rows.len() - 1 {
+                                        0
+                                    } else {
+                                        i + 1
+                                    }
                                 }
-                            }
-                            None => 0,
-                        };
-                        state.select(Some(i));
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
-                        let i = match state.selected() {
-                            Some(i) => {
-                                if i == 0 {
-                                    data.rows.len() - 1
-                                } else {
-                                    i - 1
+                        if !data.rows.is_empty() {
+                            let i = match state.selected() {
+                                Some(i) => {
+                                    if i == 0 {
+                                        data.rows.len() - 1
+                                    } else {
+                                        i - 1
+                                    }
                                 }
-                            }
-                            None => 0,
-                        };
-                        state.select(Some(i));
+                                None => 0,
+                            };
+                            state.select(Some(i));
+                        }
                     }
                     _ => {}
                 }
