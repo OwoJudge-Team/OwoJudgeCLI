@@ -3,6 +3,7 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 
 #[derive(Serialize, Deserialize, Default, Debug, Clone)]
@@ -13,18 +14,16 @@ pub struct AppConfig {
 
 impl AppConfig {
     pub fn load() -> Result<Self> {
-        let path = get_config_path()?;
-        if path.exists() {
-            let content = fs::read_to_string(&path)?;
-            let config: AppConfig = serde_json::from_str(&content)?;
-            Ok(config)
-        } else {
-            Ok(AppConfig::default())
+        let path = Self::config_path()?;
+        match fs::read_to_string(&path) {
+            Ok(content) => Ok(serde_json::from_str(&content)?),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(AppConfig::default()),
+            Err(e) => Err(e.into()),
         }
     }
 
     pub fn save(&self) -> Result<()> {
-        let path = get_config_path()?;
+        let path = Self::config_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -46,6 +45,12 @@ impl AppConfig {
             .map(|(k, v)| format!("{}={}", k, v))
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    fn config_path() -> Result<PathBuf> {
+        let proj_dirs = ProjectDirs::from("com", "owojudge", "cli")
+            .context("Could not determine config directory")?;
+        Ok(proj_dirs.config_dir().join("config.json"))
     }
 }
 
@@ -69,10 +74,4 @@ mod tests {
             assert!(header.contains("; "));
         }
     }
-}
-
-fn get_config_path() -> Result<PathBuf> {
-    let proj_dirs = ProjectDirs::from("com", "owojudge", "cli")
-        .context("Could not determine config directory")?;
-    Ok(proj_dirs.config_dir().join("config.json"))
 }
