@@ -115,6 +115,57 @@ In interactive views (Problem, Announcement, Contest):
 - **Tab**: Switch focus between scrollable sections (where applicable).
 - **q / Esc**: Exit the interactive view.
 
+## Model Context Protocol (MCP) Server
+
+This project also includes an MCP server that allows LLMs (like Claude) to interact with OwoJudge.
+
+### Building the MCP Server
+
+```bash
+cd owojudge-mcp
+cargo build --release
+```
+
+The binary will be available at `owojudge-mcp/target/release/owojudge-mcp`.
+
+### Configuring with Claude Desktop
+
+Add the following to your `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "owojudge": {
+      "command": "/path/to/owojudge-mcp/target/release/owojudge-mcp"
+    }
+  }
+}
+```
+
+### Configuring with Gemini CLI
+
+To add the OwoJudge tools to your Gemini CLI sessions, run:
+
+```bash
+gemini mcp add owojudge /path/to/owojudge-mcp/target/release/owojudge-mcp
+```
+
+This will make all OwoJudge tools available in any Gemini CLI agent session.
+
+### Available Tools
+
+- `login`: Log in to the judge (sessions are persisted in config).
+- `logout`: Log out and clear local session.
+- `get_auth_status`: Check current authentication status and user info.
+- `list_problems`: List all available programming problems.
+- `get_problem`: Get detailed information about a problem. **Automatically converts PDF descriptions to text using the Gemini CLI tool.**
+- `submit_solution`: Submit a code solution for a problem.
+- `list_submissions`: List recent code submissions.
+- `get_submission`: Get detailed information about a submission (results, code).
+- `list_announcements`: List all judge announcements.
+- `list_contests`: List available programming contests.
+- `get_contest_standings`: Get the scoreboard for a specific contest.
+
 ## License
 
 This project is licensed under the MIT License.
