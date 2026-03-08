@@ -133,7 +133,7 @@ enum Commands {
     },
     /// Submit a solution
     Submit {
-        #[arg(long, short)]
+        #[arg(long, short = 'i')]
         problem_id: u64,
         #[arg(long, short)]
         language: String,
@@ -287,8 +287,7 @@ async fn main() -> Result<()> {
                         println!("Downloading PDF problem statement...");
                         let pdf_url = client.resolve_url(&pdf_url)?;
                         let bytes = client.download_url(&pdf_url).await?;
-                        let tmp_path = std::env::temp_dir()
-                            .join(format!("problem_{}.pdf", id));
+                        let tmp_path = std::env::current_dir()?.join(format!("problem_{}.pdf", id));
                         fs::write(&tmp_path, &bytes)?;
                         println!("Saved to: {}", tmp_path.display());
                         open_path(&tmp_path)?;

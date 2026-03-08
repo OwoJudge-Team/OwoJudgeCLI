@@ -82,6 +82,7 @@ pub struct Contest {
     pub end_time: Option<String>,
     pub submission_end_time: String,
     pub released: bool,
+    #[serde(default)]
     pub can_apply_gm: bool,
     pub problems: Vec<ProblemInContest>,
 }
